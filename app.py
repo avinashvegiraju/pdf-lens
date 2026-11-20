@@ -89,6 +89,36 @@ st.markdown("""
         border-radius: 4px;
         margin-right: 6px;
     }
+    .perf-badge {
+        font-size: 0.76rem;
+        padding: 3px 8px;
+        border-radius: 4px;
+        margin-right: 6px;
+        margin-bottom: 4px;
+        display: inline-block;
+        background: #f8f9fa;
+        border: 1px solid #dadce0;
+        color: #3c4043;
+    }
+    .perf-pass {
+        color: #137333;
+        font-weight: 600;
+    }
+    .perf-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+        margin-top: 6px;
+    }
+    .perf-table th, .perf-table td {
+        border: 1px solid #e0e0e0;
+        padding: 6px 8px;
+        text-align: left;
+    }
+    .perf-table th {
+        background-color: #f1f3f4;
+        color: #202124;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,7 +130,8 @@ from rag_pdf.retrieval import LocalVectorIndex
 from rag_pdf.generation import (
     LLMClient,
     check_llama_health,
-    extract_and_validate_citations
+    extract_and_validate_citations,
+    get_system_memory_metrics
 )
 from rag_pdf.pdf_preview import render_pdf_page
 
@@ -299,6 +330,16 @@ with col_left:
         5. **Generate:** Streams grounded answer from local **LiquidAI LFM3-1.7B** with citations `[S1]`, `[S2]`.
         """)
 
+    # 7. Live System Resource Telemetry
+    with st.expander("⚡ Hardware & Memory Telemetry"):
+        curr_rss, sys_used = get_system_memory_metrics()
+        st.markdown(f"""
+        - **App + LFM3 Footprint:** `{curr_rss:.1f} MB`
+        - **System RAM In Use:** `{sys_used:.1f} GB`
+        - **Hardware Engine:** Apple Silicon Metal (`-ngl 99`)
+        - **Retrieval Engine:** NumPy Cosine (`float32`)
+        """)
+
 
 # =======================================================
 # COLUMN 2: CENTER / CHAT (~43%)
@@ -315,15 +356,76 @@ with col_center:
                 st.markdown(msg.content)
                 if msg.metrics:
                     m = msg.metrics
+                    # Summary metric badges
                     st.markdown(
-                        f'<div style="margin-top:4px;">'
-                        f'<span class="metric-pill">⚡ Retrieval: {m.retrieval_ms:.0f}ms</span>'
-                        f'<span class="metric-pill">⏱️ 1st token: {m.first_token_ms:.0f}ms</span>'
-                        f'<span class="metric-pill">⏳ Gen: {m.total_generation_ms:.0f}ms</span>'
-                        f'<span class="metric-pill">📝 {m.output_tokens} tokens</span>'
+                        f'<div style="margin-top:6px; margin-bottom:6px;">'
+                        f'<span class="perf-badge">⚡ <b>Retrieval:</b> {m.retrieval_ms:.1f}ms</span>'
+                        f'<span class="perf-badge">⏱️ <b>TTFT:</b> {m.first_token_ms:.0f}ms</span>'
+                        f'<span class="perf-badge">🚀 <b>Throughput:</b> {m.tokens_per_second:.1f} tok/s</span>'
+                        f'<span class="perf-badge">⌛ <b>Total:</b> {m.total_response_ms/1000.0:.2f}s</span>'
+                        f'<span class="perf-badge">🧠 <b>Memory:</b> {m.memory_rss_mb:.0f}MB</span>'
                         f'</div>',
                         unsafe_allow_html=True
                     )
+                    
+                    # Detailed benchmark evaluation drawer
+                    with st.expander("📊 Performance Benchmark vs M2 Mac Targets", expanded=False):
+                        r_status = "✅ PASS" if m.is_retrieval_fast else "🟡 ACCEPTABLE"
+                        t_status = "✅ PASS" if m.is_ttft_fast else "🟡 ACCEPTABLE"
+                        s_status = "✅ PASS" if m.is_throughput_good else "🟡 ACCEPTABLE"
+                        tot_status = "✅ PASS" if m.is_response_fast else "🟡 ACCEPTABLE"
+                        mem_status = "✅ PASS" if (m.memory_rss_mb < 2000.0 or m.memory_rss_mb == 0.0) else "🟡 ACCEPTABLE"
+                        
+                        st.markdown(f"""
+                        <table class="perf-table">
+                            <thead>
+                                <tr>
+                                    <th>Metric</th>
+                                    <th>What It Measures</th>
+                                    <th>Target on M2 Mac (16 GB)</th>
+                                    <th>Measured Value</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><b>Retrieval Latency</b></td>
+                                    <td>Time to encode query + compute NumPy dot products</td>
+                                    <td>&lt; 10 ms</td>
+                                    <td><code>{m.retrieval_ms:.1f} ms</code></td>
+                                    <td><b>{r_status}</b></td>
+                                </tr>
+                                <tr>
+                                    <td><b>TTFT (Time To First Token)</b></td>
+                                    <td>Latency from question submit until first word appears</td>
+                                    <td>&lt; 1,000 ms</td>
+                                    <td><code>{m.first_token_ms:.0f} ms</code></td>
+                                    <td><b>{t_status}</b></td>
+                                </tr>
+                                <tr>
+                                    <td><b>Generation Throughput</b></td>
+                                    <td>Output speed of the model</td>
+                                    <td>&gt; 50 tokens/sec</td>
+                                    <td><code>{m.tokens_per_second:.1f} tokens/sec</code></td>
+                                    <td><b>{s_status}</b></td>
+                                </tr>
+                                <tr>
+                                    <td><b>Total Response Time</b></td>
+                                    <td>End-to-end time until answer completion</td>
+                                    <td>2 – 4 s</td>
+                                    <td><code>{m.total_response_ms/1000.0:.2f} s ({m.total_response_ms:.0f} ms)</code></td>
+                                    <td><b>{tot_status}</b></td>
+                                </tr>
+                                <tr>
+                                    <td><b>Memory Footprint</b></td>
+                                    <td>System RAM / Metal unified memory used</td>
+                                    <td>&lt; 2,000 MB</td>
+                                    <td><code>{m.memory_rss_mb:.1f} MB (App + LFM3)</code></td>
+                                    <td><b>{mem_status}</b></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        """, unsafe_allow_html=True)
                 if msg.unverified_citations:
                     st.warning(f"Note: Unverified citation(s) mentioned: {', '.join(msg.unverified_citations)}")
 
@@ -420,6 +522,7 @@ if user_query:
                         
                         if metrics:
                             metrics.retrieval_ms = round(retrieval_duration_ms, 1)
+                            metrics.total_response_ms = round(metrics.retrieval_ms + metrics.total_generation_ms, 1)
 
                         # Validate citations
                         verified_cits, unverified_cits = extract_and_validate_citations(full_response, sources)

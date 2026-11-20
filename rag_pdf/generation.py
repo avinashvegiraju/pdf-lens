@@ -1,10 +1,16 @@
 """LFM3 LLM adapter via llama.cpp OpenAI-compatible chat API with grounded citation prompting."""
 
+import os
 import re
 import time
 from typing import List, Dict, Generator, Tuple, Optional, Any
 import urllib.request
 import urllib.error
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 try:
     from openai import OpenAI
@@ -28,6 +34,37 @@ RULES:
    "I couldn't find that information in the selected PDF pages."
 6. Explain clearly, simply, and briefly. Preserve important safety warnings.
 7. If different sources disagree, mention that instead of hiding it."""
+
+
+def get_system_memory_metrics() -> Tuple[float, float]:
+    """
+    Measure memory footprint in MB (current process + llama-server process)
+    and overall system RAM used in GB.
+    Returns (process_memory_mb, system_used_gb).
+    """
+    if psutil is None:
+        return 0.0, 0.0
+
+    try:
+        current_proc = psutil.Process(os.getpid())
+        mem_mb = current_proc.memory_info().rss / (1024.0 * 1024.0)
+
+        # Include llama-server process memory if running locally
+        for p in psutil.process_iter(["name", "memory_info"]):
+            try:
+                name = (p.info.get("name") or "").lower()
+                if "llama" in name and p.pid != os.getpid():
+                    mem_info = p.info.get("memory_info")
+                    if mem_info:
+                        mem_mb += mem_info.rss / (1024.0 * 1024.0)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        vm = psutil.virtual_memory()
+        sys_used_gb = vm.used / (1024.0 ** 3)
+        return round(mem_mb, 1), round(sys_used_gb, 2)
+    except Exception:
+        return 0.0, 0.0
 
 
 def check_llama_health(health_url: Optional[str] = None) -> Tuple[bool, str]:
@@ -217,14 +254,29 @@ class LLMClient:
 
         end_time = time.perf_counter()
         first_ms = (first_token_time - start_time) * 1000.0 if first_token_time else 0.0
-        total_ms = (end_time - start_time) * 1000.0
+        total_gen_ms = (end_time - start_time) * 1000.0
+
+        # Throughput calculation: output tokens / generation duration in seconds
+        if first_token_time and end_time > first_token_time:
+            active_gen_sec = end_time - first_token_time
+            tps = round(output_token_count / active_gen_sec, 1) if active_gen_sec > 0 else 0.0
+        elif total_gen_ms > 0:
+            tps = round(output_token_count / (total_gen_ms / 1000.0), 1)
+        else:
+            tps = 0.0
+
+        mem_rss, sys_mem = get_system_memory_metrics()
 
         metrics = GenerationMetrics(
             retrieval_ms=0.0,
             first_token_ms=round(first_ms, 1),
-            total_generation_ms=round(total_ms, 1),
+            total_generation_ms=round(total_gen_ms, 1),
+            total_response_ms=round(total_gen_ms, 1),
             output_tokens=output_token_count,
-            prompt_tokens=estimate_tokens(prompt_text) + estimate_tokens(SYSTEM_PROMPT)
+            tokens_per_second=tps,
+            prompt_tokens=estimate_tokens(prompt_text) + estimate_tokens(SYSTEM_PROMPT),
+            memory_rss_mb=mem_rss,
+            system_memory_used_gb=sys_mem
         )
 
         yield "", metrics

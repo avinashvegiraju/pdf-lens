@@ -69,11 +69,31 @@ class RetrievedSource:
 
 @dataclass
 class GenerationMetrics:
-    retrieval_ms: float = 0.0
-    first_token_ms: float = 0.0
+    retrieval_ms: float = 0.0               # Target: < 10 ms
+    first_token_ms: float = 0.0             # Target (TTFT): < 1,000 ms
     total_generation_ms: float = 0.0
+    total_response_ms: float = 0.0          # Target: 2 - 4 s (retrieval_ms + total_generation_ms)
     output_tokens: int = 0
+    tokens_per_second: float = 0.0          # Target: > 50 tokens/sec
     prompt_tokens: int = 0
+    memory_rss_mb: float = 0.0              # App + Llama process memory in MB
+    system_memory_used_gb: float = 0.0      # Total system RAM used in GB
+
+    @property
+    def is_retrieval_fast(self) -> bool:
+        return self.retrieval_ms < 10.0
+
+    @property
+    def is_ttft_fast(self) -> bool:
+        return self.first_token_ms < 1000.0
+
+    @property
+    def is_throughput_good(self) -> bool:
+        return self.tokens_per_second >= 50.0
+
+    @property
+    def is_response_fast(self) -> bool:
+        return self.total_response_ms <= 4000.0
 
 
 @dataclass

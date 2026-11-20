@@ -108,6 +108,43 @@ def test_mock_streaming_generation(sample_sources):
         assert final_metrics is not None
         assert final_metrics.output_tokens == 2
         assert final_metrics.total_generation_ms >= 0
+        assert final_metrics.tokens_per_second >= 0.0
+        assert final_metrics.total_response_ms >= 0.0
+
+
+def test_generation_metrics_benchmarks():
+    """Verify target checks on GenerationMetrics properties."""
+    from rag_pdf.models import GenerationMetrics
+
+    m_fast = GenerationMetrics(
+        retrieval_ms=3.5,
+        first_token_ms=620.0,
+        total_generation_ms=1800.0,
+        total_response_ms=1803.5,
+        output_tokens=105,
+        tokens_per_second=58.3,
+        memory_rss_mb=1200.0
+    )
+
+    assert m_fast.is_retrieval_fast is True
+    assert m_fast.is_ttft_fast is True
+    assert m_fast.is_throughput_good is True
+    assert m_fast.is_response_fast is True
+
+    m_slow = GenerationMetrics(
+        retrieval_ms=15.0,
+        first_token_ms=1500.0,
+        total_generation_ms=5000.0,
+        total_response_ms=5015.0,
+        output_tokens=40,
+        tokens_per_second=26.0,
+        memory_rss_mb=2500.0
+    )
+
+    assert m_slow.is_retrieval_fast is False
+    assert m_slow.is_ttft_fast is False
+    assert m_slow.is_throughput_good is False
+    assert m_slow.is_response_fast is False
 
 
 def test_health_check_offline():
