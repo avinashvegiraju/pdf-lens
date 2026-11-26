@@ -2,15 +2,26 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 import numpy as np
+
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
 
 from .config import config
 from .models import PDFMetadata, ChunkMetadata, RetrievedSource
 from .embeddings import encode_texts, encode_query
 
 logger = logging.getLogger(__name__)
+
+
+def tokenize_for_bm25(text: str) -> List[str]:
+    """Simple alphanumeric word tokenizer for BM25 sparse retrieval."""
+    return re.findall(r"\w+", text.lower())
 
 
 class LocalVectorIndex:
@@ -139,10 +150,16 @@ class LocalVectorIndex:
         query: str,
         doc_ids: Optional[List[str]] = None,
         top_k: int = 4,
-        embedding_model: Optional[Any] = None
+        embedding_model: Optional[Any] = None,
+        mode: str = "hybrid",
+        dense_weight: float = 0.65
     ) -> List[RetrievedSource]:
         """
-        Perform cosine similarity search over the specified documents (or all if doc_ids is None).
+        Perform retrieval over specified documents.
+        Supports:
+          - 'hybrid': Fuses dense cosine similarity + BM25 sparse keyword ranking.
+          - 'dense': Pure NumPy cosine dot-product (v1 behavior).
+          - 'sparse': Pure BM25 keyword matching (optimal for error codes, part numbers).
         Returns top_k RetrievedSource objects with assigned citations [S1]..[SK].
         """
         if not query.strip():
@@ -170,14 +187,45 @@ class LocalVectorIndex:
         if not all_chunks or not all_embeddings:
             return []
 
-        # 2. Stack vector matrices
-        corpus_matrix = np.vstack(all_embeddings)  # Shape: (Total_Chunks, 384)
-        
-        # 3. Encode query into unit-normalized vector
-        q_vec = encode_query(query, model=embedding_model)  # Shape: (384,)
+        num_chunks = len(all_chunks)
 
-        # 4. Cosine similarity: unit-normalized matrix @ unit-normalized vector
-        scores = np.dot(corpus_matrix, q_vec)
+        # 2. Compute Dense Scores
+        if mode in ("dense", "hybrid") or BM25Okapi is None:
+            corpus_matrix = np.vstack(all_embeddings)  # Shape: (Total_Chunks, 384)
+            q_vec = encode_query(query, model=embedding_model)  # Shape: (384,)
+            dense_scores = np.dot(corpus_matrix, q_vec)
+        else:
+            dense_scores = np.zeros(num_chunks, dtype=np.float32)
+
+        # 3. Compute Sparse BM25 Scores if available and requested
+        if mode in ("sparse", "hybrid") and BM25Okapi is not None:
+            tokenized_corpus = [tokenize_for_bm25(c.text) for c in all_chunks]
+            q_tokens = tokenize_for_bm25(query)
+            if q_tokens:
+                bm25 = BM25Okapi(tokenized_corpus)
+                raw_bm25 = np.array(bm25.get_scores(q_tokens), dtype=np.float32)
+                # Min-Max normalize BM25 scores to [0, 1] range
+                bm25_max = np.max(raw_bm25)
+                bm25_min = np.min(raw_bm25)
+                if bm25_max > bm25_min:
+                    norm_bm25 = (raw_bm25 - bm25_min) / (bm25_max - bm25_min)
+                elif bm25_max > 0:
+                    norm_bm25 = raw_bm25 / bm25_max
+                else:
+                    norm_bm25 = raw_bm25
+            else:
+                norm_bm25 = np.zeros(num_chunks, dtype=np.float32)
+        else:
+            norm_bm25 = np.zeros(num_chunks, dtype=np.float32)
+
+        # 4. Fusion of Scores
+        if mode == "hybrid" and BM25Okapi is not None:
+            # If dense scores are zero (or pure BM25), adjust weight
+            scores = (dense_weight * dense_scores) + ((1.0 - dense_weight) * norm_bm25)
+        elif mode == "sparse" and BM25Okapi is not None:
+            scores = norm_bm25
+        else:
+            scores = dense_scores
 
         # 5. Sort descending
         ranked_indices = np.argsort(scores)[::-1]

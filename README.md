@@ -1,6 +1,16 @@
-# 🔍 PDF Lens — Local PDF RAG with Right-Side Evidence Viewer
+# 🔍 PDF Lens v2 — Local Agentic PDF RAG with Evidence Viewer
 
-**PDF Lens** is a lightweight, fully private retrieval-augmented generation (RAG) system built for Apple Silicon Macs. It allows users to query PDF documents and immediately view the exact supporting source passages—complete with translucent highlight overlays directly on the rendered original PDF page—before and while the local **LiquidAI LFM3-1.7B** language model streams grounded answers with verified citations (`[S1]`, `[S2]`).
+**PDF Lens v2** is a lightweight, fully private **Agentic Retrieval-Augmented Generation (RAG)** system built for Apple Silicon Macs. It combines an autonomous multi-agent reasoning loop (Query Planner, Hybrid Search Tool, Python Math Sandbox, and Self-Reflective Critic) with local **LiquidAI LFM3-1.7B** Metal GPU inference and PyMuPDF geometric highlight previews.
+
+---
+
+## 🚀 What's New in v2 (Agentic RAG)
+- **Autonomous Query Planning:** Decomposes complex and comparative multi-part prompts into targeted sub-queries.
+- **Hybrid Retrieval (Dense + BM25):** Combines 384-dim dense embeddings (`all-MiniLM-L6-v2`) with sparse lexical BM25 (`rank-bm25`) for exact part numbers, fault codes, and keywords.
+- **Python Calculation Sandbox:** Executes local, sandboxed Python expressions for math and unit conversions (e.g., PSI to kPa/bar).
+- **Self-Reflective Critic Agent (CRAG):** Fact-checks draft answers, verifies `[S#]` citations, and detects hallucinations before presenting the final answer.
+- **Multi-Page Evidence Canvas:** Enables quick-switching and previewing across all distinct physical pages cited in an answer.
+- **Live Hardware Telemetry:** Displays real-time Retrieval Latency, TTFT, Tokens/sec, Total Response Time, and RAM footprint.
 
 ---
 

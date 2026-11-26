@@ -103,3 +103,4 @@ class ChatMessage:
     sources: List[RetrievedSource] = field(default_factory=list)
     metrics: Optional[GenerationMetrics] = None
     unverified_citations: List[str] = field(default_factory=list)
+    agent_trace: List[Dict[str, str]] = field(default_factory=list)

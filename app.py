@@ -133,6 +133,11 @@ from rag_pdf.generation import (
     extract_and_validate_citations,
     get_system_memory_metrics
 )
+from rag_pdf.agents import (
+    AgenticRAGOrchestrator,
+    AgentTraceStep,
+    AgenticResponse
+)
 from rag_pdf.pdf_preview import render_pdf_page
 
 # Ensure directories exist
@@ -310,7 +315,23 @@ with col_left:
 
     st.markdown("---")
 
-    # 5. Search Controls
+    # 5. Architecture & Search Controls (v2)
+    st.markdown("**🧠 RAG Pipeline Mode (v2)**")
+    rag_mode_options = ["agentic", "hybrid", "dense", "sparse"]
+    selected_rag_mode = st.radio(
+        "Select Pipeline Mode",
+        options=rag_mode_options,
+        format_func=lambda x: {
+            "agentic": "🤖 Agentic v2 (Planner + Tools + Critic)",
+            "hybrid": "⚡ Hybrid (Dense + BM25)",
+            "dense": "🎯 Direct Dense (Vectors)",
+            "sparse": "🔍 Direct Sparse (BM25)"
+        }[x],
+        index=0,
+        label_visibility="collapsed"
+    )
+    st.session_state.rag_mode = selected_rag_mode
+
     top_k = st.slider("Top-K Passages", min_value=2, max_value=8, value=4, step=1)
     
     if st.button("🧹 Clear Chat", use_container_width=True):
@@ -428,6 +449,20 @@ with col_center:
                         """, unsafe_allow_html=True)
                 if msg.unverified_citations:
                     st.warning(f"Note: Unverified citation(s) mentioned: {', '.join(msg.unverified_citations)}")
+                
+                # Agent Reasoning Trace (v2)
+                if msg.agent_trace:
+                    with st.expander("🧠 Agent Reasoning Trace (v2)", expanded=False):
+                        for step in msg.agent_trace:
+                            icon = {
+                                "PLANNER": "🧭",
+                                "RETRIEVAL": "🔍",
+                                "CALCULATOR": "🧮",
+                                "GENERATOR": "🤖",
+                                "CRITIC": "🛡️"
+                            }.get(step.get("agent_name"), "⚡")
+                            st.markdown(f"**{icon} {step.get('title', '')}**")
+                            st.caption(step.get("detail", ""))
 
     # Chat input
     user_query = st.chat_input("Ask a question about your indexed PDF(s)...")
@@ -464,26 +499,21 @@ if user_query:
             with st.chat_message("assistant"):
                 st.warning("Please upload a PDF or load the sample car manual first.")
     else:
-        # 2. IMMEDIATE RETRIEVAL BEFORE GENERATION STARTS!
-        t_ret_start = time.perf_counter()
-        sources = vector_index.search(
-            query=user_query,
-            doc_ids=target_doc_ids,
-            top_k=top_k,
-            embedding_model=embedder
-        )
-        t_ret_end = time.perf_counter()
-        retrieval_duration_ms = (t_ret_end - t_ret_start) * 1000.0
-
-        st.session_state.last_retrieved_sources = sources
-        if sources:
-            st.session_state.selected_source_for_preview = sources[0]
-        else:
-            st.session_state.selected_source_for_preview = None
-
-        # 3. STREAM GENERATION IN CENTER COLUMN
+        active_mode = st.session_state.get("rag_mode", "agentic")
         is_conn, _ = check_llama_health()
+
         if not is_conn:
+            # When server offline, perform immediate search and inform user
+            sources = vector_index.search(
+                query=user_query,
+                doc_ids=target_doc_ids,
+                top_k=top_k,
+                embedding_model=embedder,
+                mode="hybrid"
+            )
+            st.session_state.last_retrieved_sources = sources
+            if sources:
+                st.session_state.selected_source_for_preview = sources[0]
             with col_center:
                 with st.chat_message("assistant"):
                     st.error(
@@ -497,48 +527,123 @@ if user_query:
                     response_placeholder = st.empty()
                     llm_client = LLMClient()
                     
-                    full_response = ""
-                    metrics = None
-
-                    # Format brief chat history for follow-ups
                     history_payload = []
                     for m in st.session_state.chat_messages[:-1]:
                         history_payload.append({"role": m.role, "content": m.content})
 
-                    try:
-                        stream_gen = llm_client.stream_answer(
-                            question=user_query,
-                            sources=sources,
-                            chat_history=history_payload
-                        )
-                        for token, final_metrics in stream_gen:
-                            if token:
-                                full_response += token
-                                response_placeholder.markdown(full_response + "▌")
-                            if final_metrics:
-                                metrics = final_metrics
-
-                        response_placeholder.markdown(full_response)
+                    if active_mode == "agentic":
+                        agent_status_placeholder = st.empty()
+                        orchestrator = AgenticRAGOrchestrator(vector_index=vector_index, llm_client=llm_client)
                         
-                        if metrics:
-                            metrics.retrieval_ms = round(retrieval_duration_ms, 1)
-                            metrics.total_response_ms = round(metrics.retrieval_ms + metrics.total_generation_ms, 1)
+                        full_response = ""
+                        metrics = None
+                        trace_data = []
+                        final_sources = []
+                        unverified_cits = []
 
-                        # Validate citations
-                        verified_cits, unverified_cits = extract_and_validate_citations(full_response, sources)
-
-                        # Store in history
-                        st.session_state.chat_messages.append(
-                            ChatMessage(
-                                role="assistant",
-                                content=full_response,
-                                sources=sources,
-                                metrics=metrics,
-                                unverified_citations=unverified_cits
+                        try:
+                            workflow_gen = orchestrator.run_agentic_workflow(
+                                query=user_query,
+                                doc_ids=target_doc_ids,
+                                top_k=top_k,
+                                embedding_model=embedder,
+                                chat_history=history_payload,
+                                search_mode="hybrid"
                             )
+                            for step, token, final_resp in workflow_gen:
+                                if step:
+                                    icon = {
+                                        "PLANNER": "🧭",
+                                        "RETRIEVAL": "🔍",
+                                        "CALCULATOR": "🧮",
+                                        "GENERATOR": "🤖",
+                                        "CRITIC": "🛡️"
+                                    }.get(step.agent_name, "⚡")
+                                    agent_status_placeholder.markdown(
+                                        f'<div class="perf-badge"><b>{icon} {step.agent_name}</b>: {step.title} — {step.detail[:75]}...</div>',
+                                        unsafe_allow_html=True
+                                    )
+                                if token:
+                                    full_response += token
+                                    response_placeholder.markdown(full_response + "▌")
+                                if final_resp:
+                                    response_placeholder.markdown(final_resp.answer)
+                                    metrics = final_resp.metrics
+                                    final_sources = final_resp.sources
+                                    trace_data = [
+                                        {"agent_name": s.agent_name, "title": s.title, "detail": s.detail}
+                                        for s in final_resp.trace_steps
+                                    ]
+                                    unverified_cits = final_resp.verification.unverified_citations
+                                    st.session_state.last_retrieved_sources = final_sources
+                                    if final_sources and not st.session_state.selected_source_for_preview:
+                                        st.session_state.selected_source_for_preview = final_sources[0]
+
+                            agent_status_placeholder.empty()
+
+                            st.session_state.chat_messages.append(
+                                ChatMessage(
+                                    role="assistant",
+                                    content=full_response,
+                                    sources=final_sources,
+                                    metrics=metrics,
+                                    unverified_citations=unverified_cits,
+                                    agent_trace=trace_data
+                                )
+                            )
+                        except Exception as e:
+                            response_placeholder.error(f"Error during agentic workflow: {e}")
+                    else:
+                        # Direct Single-Shot Retrieval & Generation
+                        t_ret_start = time.perf_counter()
+                        sources = vector_index.search(
+                            query=user_query,
+                            doc_ids=target_doc_ids,
+                            top_k=top_k,
+                            embedding_model=embedder,
+                            mode=active_mode
                         )
-                    except Exception as e:
-                        response_placeholder.error(f"Error during streaming generation: {e}")
+                        t_ret_end = time.perf_counter()
+                        retrieval_duration_ms = (t_ret_end - t_ret_start) * 1000.0
+
+                        st.session_state.last_retrieved_sources = sources
+                        if sources:
+                            st.session_state.selected_source_for_preview = sources[0]
+
+                        full_response = ""
+                        metrics = None
+
+                        try:
+                            stream_gen = llm_client.stream_answer(
+                                question=user_query,
+                                sources=sources,
+                                chat_history=history_payload
+                            )
+                            for token, final_metrics in stream_gen:
+                                if token:
+                                    full_response += token
+                                    response_placeholder.markdown(full_response + "▌")
+                                if final_metrics:
+                                    metrics = final_metrics
+
+                            response_placeholder.markdown(full_response)
+                            if metrics:
+                                metrics.retrieval_ms = round(retrieval_duration_ms, 1)
+                                metrics.total_response_ms = round(metrics.retrieval_ms + metrics.total_generation_ms, 1)
+
+                            verified_cits, unverified_cits = extract_and_validate_citations(full_response, sources)
+
+                            st.session_state.chat_messages.append(
+                                ChatMessage(
+                                    role="assistant",
+                                    content=full_response,
+                                    sources=sources,
+                                    metrics=metrics,
+                                    unverified_citations=unverified_cits
+                                )
+                            )
+                        except Exception as e:
+                            response_placeholder.error(f"Error during streaming generation: {e}")
 
         # Force rerun so evidence cards and interactive preview buttons sync seamlessly
         st.rerun()
@@ -575,6 +680,20 @@ with evidence_container:
 
         st.markdown("---")
         
+        # Multi-Page Canvas Navigation
+        distinct_pages = sorted(list({src.page_number for src in sources}))
+        if len(distinct_pages) > 1:
+            st.caption(f"📑 Evidence spans **{len(distinct_pages)} distinct pages** — click below to view:")
+            cols_page = st.columns(min(len(distinct_pages), 5))
+            for i, p_num in enumerate(distinct_pages):
+                with cols_page[i % len(cols_page)]:
+                    page_srcs = [s for s in sources if s.page_number == p_num]
+                    is_active = (selected_src and selected_src.page_number == p_num)
+                    btn_label = f"{'📍' if is_active else '📄'} P.{p_num}"
+                    if st.button(btn_label, key=f"quick_p_{p_num}", use_container_width=True):
+                        st.session_state.selected_source_for_preview = page_srcs[0]
+                        st.rerun()
+
         # Render PDF Page Preview
         selected_src = st.session_state.selected_source_for_preview
         if selected_src:

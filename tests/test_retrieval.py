@@ -167,3 +167,28 @@ def test_real_semantic_retrieval_on_sample_pdf(temp_index_dir):
     assert top_result.page_number == 1
     assert "temperature" in top_result.text.lower() or "overheating" in top_result.text.lower()
     assert top_result.score > 0.4
+
+
+def test_bm25_sparse_and_hybrid_search(temp_index_dir):
+    """Test BM25 keyword matching and hybrid fusion for specific terminology."""
+    sample_pdf_path = Path(__file__).parent.parent / "sample_data" / "demo_vehicle_guide.pdf"
+    with open(sample_pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    meta, chunks = extract_and_chunk_pdf(pdf_bytes, "demo_vehicle_guide.pdf")
+
+    index = LocalVectorIndex(index_dir=temp_index_dir)
+    embedder = get_embedding_model()
+    index.index_document(meta, chunks, embedding_model=embedder)
+
+    # Specific keyword test: "TPMS" and "33 psi" on Page 2
+    query = "TPMS 33 psi"
+    results_bm25 = index.search(query, doc_ids=[meta.doc_id], top_k=2, embedding_model=embedder, mode="sparse")
+    assert len(results_bm25) >= 1
+    assert results_bm25[0].page_number == 2
+    assert "33 psi" in results_bm25[0].text or "tpms" in results_bm25[0].text.lower()
+
+    # Hybrid search
+    results_hybrid = index.search(query, doc_ids=[meta.doc_id], top_k=2, embedding_model=embedder, mode="hybrid")
+    assert len(results_hybrid) >= 1
+    assert results_hybrid[0].page_number == 2
